@@ -1,7 +1,6 @@
 services:
   postgres:
     image: postgres:16
-    privileged: true
     environment:
       POSTGRES_DB: appdb
       POSTGRES_USER: app
@@ -38,7 +37,7 @@ services:
 
       PORT: "8080"
     ports:
-      - "80:8080"
+      - "8080:8080"
 
 volumes:
   pgdata:
