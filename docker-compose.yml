@@ -1,20 +1,4 @@
 services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: appdb
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
-    ports:
-      - "5433:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app -d appdb"]
-      interval: 2s
-      timeout: 2s
-      retries: 20
-
 
   app:
     build: .
@@ -22,7 +6,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DB_URL: jdbc:postgresql://postgres:5432/appdb
+      DB_URL: jdbc:postgresql://backend-postgres-1:5432/appdb
       DB_USER: app
       DB_PASSWORD: app
 
