@@ -28,6 +28,8 @@ dependencies {
     implementation("org.postgresql:postgresql:42.7.3")
     implementation("at.favre.lib:bcrypt:0.10.2")
     testImplementation(kotlin("test"))
+    testImplementation("com.h2database:h2:2.2.224")
+    testImplementation("io.ktor:ktor-server-tests-jvm:$ktor_version")
 }
 
 tasks.test { useJUnitPlatform() }

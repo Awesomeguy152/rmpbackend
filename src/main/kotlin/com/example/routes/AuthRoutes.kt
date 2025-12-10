@@ -15,7 +15,12 @@ import com.auth0.jwt.JWT
 import java.util.Date
 
 
-@Serializable data class RegisterRq(val email: String, val password: String, val role: Role)
+@Serializable data class RegisterRq(
+    val email: String,
+    val password: String,
+    val role: Role,
+    val adminSecret: String? = null
+)
 @Serializable data class LoginRq(val email: String, val password: String)
 @Serializable data class ForgotRq(val email: String)
 @Serializable data class ResetRq(val email: String, val token: String, val newPassword: String)
@@ -30,6 +35,23 @@ fun Route.authRoutes() {
         // регистрация
         post("/register") {
             val rq = call.receive<RegisterRq>()
+
+            if (rq.role == Role.ADMIN) {
+                val requiredSecret = System.getenv("ADMIN_REGISTRATION_SECRET")?.takeIf { it.isNotBlank() }
+
+                when {
+                    requiredSecret == null -> {
+                        application.log.warn("Admin registration blocked: ADMIN_REGISTRATION_SECRET not configured")
+                        call.respond(HttpStatusCode.Forbidden, mapOf("error" to "admin_registration_disabled"))
+                        return@post
+                    }
+                    rq.adminSecret.isNullOrBlank() || rq.adminSecret != requiredSecret -> {
+                        call.respond(HttpStatusCode.Forbidden, mapOf("error" to "admin_secret_invalid"))
+                        return@post
+                    }
+                }
+            }
+
             val dto = service.create(rq.email.trim(), rq.password, rq.role)
             call.respond(HttpStatusCode.Created, dto)
         }

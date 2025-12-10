@@ -1,6 +1,11 @@
 package com.example.plugins
 
 import com.example.schema.UserTable
+import com.example.schema.Conversations
+import com.example.schema.ConversationMembers
+import com.example.schema.Messages
+import com.example.schema.MessageAttachments
+import com.example.schema.ConversationReadMarkers
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import io.ktor.server.application.*
@@ -36,11 +41,12 @@ fun Application.configureDatabase() {
     transaction {
         SchemaUtils.createMissingTablesAndColumns(
             UserTable,
-            PasswordResetTokens
+            PasswordResetTokens,
+            Conversations,
+            ConversationMembers,
+            Messages,
+            MessageAttachments,
+            ConversationReadMarkers
         )
-    }
-
-    transaction {
-        SchemaUtils.createMissingTablesAndColumns(UserTable)
     }
 }

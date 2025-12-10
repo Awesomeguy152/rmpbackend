@@ -39,6 +39,9 @@ services:
       JWT_ISSUER: ktor.io
       JWT_AUDIENCE: ktor-audience
 
+      # Admin registration
+      ADMIN_REGISTRATION_SECRET: super-secret
+
       # HTTP порт
       PORT: "8080"
 
