@@ -77,6 +77,27 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/ConversationSummary" }
         "401": { description: Unauthorized }
+  /api/chat/conversations/{id}:
+    get:
+      summary: Get conversation details
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      responses:
+        "200":
+          description: Conversation summary for requested id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConversationSummary" }
+        "400": { description: Invalid conversation id }
+        "401": { description: Unauthorized }
+        "403": { description: Forbidden }
+        "404": { description: Conversation not found }
   /api/chat/conversations/group:
     post:
       summary: Create group conversation
@@ -415,16 +436,49 @@ paths:
         "401": { description: Unauthorized }
   /api/me:
     get:
-      {
-        security: [{ bearerAuth: [] }],
-        responses: { "200": { description: OK } },
-      }
+      summary: Get current user profile
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Current user profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserProfile" }
+        "400": { description: Invalid token subject }
+        "401": { description: Unauthorized }
+        "404": { description: User not found }
   /api/admin/users:
     get:
       {
         security: [{ bearerAuth: [] }],
         responses: { "200": { description: OK } },
       }
+  /api/users:
+    get:
+      summary: Search users to start conversations with
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - {
+            name: q,
+            in: query,
+            schema: { type: string },
+            description: Filter users by email substring,
+          }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100 },
+            description: Maximum number of results,
+          }
+      responses:
+        "200":
+          description: Matching user profiles (excluding requester)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/UserProfile" }
+        "401": { description: Unauthorized }
 components:
   securitySchemes:
     bearerAuth:
@@ -527,6 +581,12 @@ components:
         attachments:
           type: array
           items: { $ref: "#/components/schemas/MessageAttachment" }
+        status:
+          type: string
+          enum: [SENT, DELIVERED, READ]
+        readBy:
+          type: array
+          items: { type: string, format: uuid }
     AiConversationRequest:
       type: object
       required: [conversationId]
@@ -553,6 +613,13 @@ components:
           allOf:
             - $ref: "#/components/schemas/Message"
         unreadCount: { type: integer, format: int64 }
+    UserProfile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        role: { type: string, enum: [ADMIN, USER] }
+        createdAt: { type: string, format: date-time }
     AiSummary:
       type: object
       properties:

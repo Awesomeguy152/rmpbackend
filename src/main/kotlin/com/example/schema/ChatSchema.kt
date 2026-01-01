@@ -26,7 +26,18 @@ object ConversationMembers : UUIDTable("conversation_members") {
     }
 }
 
+object ConversationPins : UUIDTable("conversation_pins") {
+    val conversation = reference("conversation_id", Conversations)
+    val user = reference("user_id", UserTable)
+    val pinnedAt = timestamp("pinned_at").defaultExpression(CurrentTimestamp())
+
+    init {
+        index(true, conversation, user)
+    }
+}
+
 enum class MessageTag { NONE, ANSWER, MEETING, IMPORTANT }
+enum class MessageStatus { SENT, DELIVERED, READ }
 
 object Messages : UUIDTable("messages") {
     val conversation = reference("conversation_id", Conversations)
@@ -36,6 +47,17 @@ object Messages : UUIDTable("messages") {
     val createdAt = timestamp("created_at").defaultExpression(CurrentTimestamp())
     val editedAt = timestamp("edited_at").nullable()
     val deletedAt = timestamp("deleted_at").nullable()
+}
+
+object MessageReactions : UUIDTable("message_reactions") {
+    val message = reference("message_id", Messages)
+    val user = reference("user_id", UserTable)
+    val emoji = varchar("emoji", 16)
+    val createdAt = timestamp("created_at").defaultExpression(CurrentTimestamp())
+
+    init {
+        index(true, message, user)
+    }
 }
 
 object MessageAttachments : UUIDTable("message_attachments") {
@@ -77,7 +99,17 @@ data class MessageDTO(
     val createdAt: String,
     val editedAt: String? = null,
     val deletedAt: String? = null,
-    val attachments: List<MessageAttachmentDTO> = emptyList()
+    val attachments: List<MessageAttachmentDTO> = emptyList(),
+    val status: MessageStatus = MessageStatus.DELIVERED,
+    val readBy: List<String> = emptyList(),
+    val reactions: List<MessageReactionDTO> = emptyList()
+)
+
+@Serializable
+data class MessageReactionDTO(
+    val emoji: String,
+    val count: Long,
+    val reactedByMe: Boolean
 )
 
 @Serializable
@@ -101,6 +133,7 @@ data class ConversationSummaryDTO(
     val topic: String?,
     val createdBy: String,
     val createdAt: String,
+    val pinnedAt: String? = null,
     val members: List<ConversationMemberDTO>,
     val lastMessage: MessageDTO?,
     val unreadCount: Long

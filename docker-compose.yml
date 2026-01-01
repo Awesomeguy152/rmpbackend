@@ -29,29 +29,21 @@ services:
       mailhog:
         condition: service_started
     environment:
-      # Postgres — внутри сети ходим по имени сервиса 'postgres' + внутренний порт 5432
-      DB_URL: jdbc:postgresql://postgres:5432/appdb
-      DB_USER: app
-      DB_PASSWORD: app
-
-      # JWT
-      JWT_SECRET: please-change-me
-      JWT_ISSUER: ktor.io
-      JWT_AUDIENCE: ktor-audience
-
-      # Admin registration
-      ADMIN_REGISTRATION_SECRET: super-secret
-
-      # HTTP порт
-      PORT: "8080"
-
-      # SMTP для восстановления пароля (MailHog)
-      SMTP_HOST: mailhog
-      SMTP_PORT: "1025"
-      SMTP_USERNAME: ""
-      SMTP_PASSWORD: ""
-      SMTP_FROM: "no-reply@yourapp.local"
-      SMTP_SECURE: "false"
+      - DB_URL=jdbc:postgresql://postgres:5432/appdb
+      - DB_USER=app
+      - DB_PASSWORD=app
+      - JWT_SECRET=please-change-me
+      - JWT_ISSUER=ktor.io
+      - JWT_AUDIENCE=ktor-audience
+      - SEED_SAMPLE_DATA=true
+      - ADMIN_REGISTRATION_SECRET=super-secret
+      - PORT=8080
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+      - SMTP_USERNAME=
+      - SMTP_PASSWORD=
+      - SMTP_FROM=no-reply@yourapp.local
+      - SMTP_SECURE=false
     ports:
       - "8080:8080"
 

@@ -3,6 +3,7 @@ package com.example.services
 import com.example.schema.ConversationDTO
 import com.example.schema.ConversationMemberDTO
 import com.example.schema.ConversationMembers
+import com.example.schema.ConversationPins
 import com.example.schema.ConversationReadMarkers
 import com.example.schema.ConversationSummaryDTO
 import com.example.schema.ConversationType
@@ -10,6 +11,9 @@ import com.example.schema.Conversations
 import com.example.schema.MessageAttachmentDTO
 import com.example.schema.MessageAttachments
 import com.example.schema.MessageDTO
+import com.example.schema.MessageReactionDTO
+import com.example.schema.MessageReactions
+import com.example.schema.MessageStatus
 import com.example.schema.MessageTag
 import com.example.schema.Messages
 import com.example.schema.UserTable
@@ -27,6 +31,7 @@ import org.jetbrains.exposed.sql.count
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.insertAndGetId
+import org.jetbrains.exposed.sql.insertIgnore
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.stringParam
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -40,6 +45,8 @@ import java.time.Instant
 import java.util.UUID
 
 class ChatService {
+
+    private val allowedEmojis = setOf("👍", "❤️", "😂", "😮", "😢", "👎")
 
     data class AttachmentInput(
         val fileName: String,
@@ -121,30 +128,68 @@ class ChatService {
 
     fun listConversations(userId: UUID, limit: Int, offset: Long): List<ConversationSummaryDTO> = transaction {
         val membership = ConversationMembers.alias("membership")
+        val pins = ConversationPins.alias("pins")
         val userEntityId = EntityID(userId, UserTable)
         val safeLimit = limit.coerceIn(1, 100)
         val safeOffset = offset.coerceAtLeast(0)
 
-        val rows = Conversations
+        Conversations
             .join(membership, JoinType.INNER, additionalConstraint = { Conversations.id eq membership[ConversationMembers.conversation] })
+            .join(pins, JoinType.LEFT, additionalConstraint = {
+                (Conversations.id eq pins[ConversationPins.conversation]) and (pins[ConversationPins.user] eq userEntityId)
+            })
             .select { membership[ConversationMembers.user] eq userEntityId }
-            .orderBy(Conversations.createdAt, SortOrder.DESC)
+            .orderBy(pins[ConversationPins.pinnedAt] to SortOrder.DESC, Conversations.createdAt to SortOrder.DESC)
             .limit(safeLimit, safeOffset)
-            .toList()
+            .map { row ->
+                val pinnedAt = row.getOrNull(pins[ConversationPins.pinnedAt])
+                row.toConversationSummary(userId, pinnedAt)
+            }
+    }
 
-        rows.map { row ->
-            val convId = row[Conversations.id].value
-            ConversationSummaryDTO(
-                id = convId.toString(),
-                type = row[Conversations.type],
-                topic = row[Conversations.topic],
-                createdBy = row[Conversations.createdBy].value.toString(),
-                createdAt = row[Conversations.createdAt].toInstantString(),
-                members = fetchMembers(convId),
-                lastMessage = fetchLastMessage(convId),
-                unreadCount = unreadCount(convId, userId)
-            )
+    fun getConversation(conversationId: UUID, requesterId: UUID): ConversationSummaryDTO = transaction {
+        ensureMembership(conversationId, requesterId)
+
+        val conversationEntityId = EntityID(conversationId, Conversations)
+        val pins = ConversationPins.alias("pins")
+        val userEntityId = EntityID(requesterId, UserTable)
+
+        Conversations
+            .join(pins, JoinType.LEFT, additionalConstraint = {
+                (Conversations.id eq pins[ConversationPins.conversation]) and (pins[ConversationPins.user] eq userEntityId)
+            })
+            .select { Conversations.id eq conversationEntityId }
+            .singleOrNull()
+            ?.let { row ->
+                val pinnedAt = row.getOrNull(pins[ConversationPins.pinnedAt])
+                row.toConversationSummary(requesterId, pinnedAt)
+            }
+            ?: throw NoSuchElementException("conversation_not_found")
+    }
+
+    fun pinConversation(conversationId: UUID, requesterId: UUID): ConversationSummaryDTO = transaction {
+        ensureMembership(conversationId, requesterId)
+        val conversationEntityId = EntityID(conversationId, Conversations)
+        val userEntityId = EntityID(requesterId, UserTable)
+
+        ConversationPins.insertIgnore {
+            it[conversation] = conversationEntityId
+            it[user] = userEntityId
         }
+
+        getConversation(conversationId, requesterId)
+    }
+
+    fun unpinConversation(conversationId: UUID, requesterId: UUID): ConversationSummaryDTO = transaction {
+        ensureMembership(conversationId, requesterId)
+        val conversationEntityId = EntityID(conversationId, Conversations)
+        val userEntityId = EntityID(requesterId, UserTable)
+
+        ConversationPins.deleteWhere {
+            (ConversationPins.conversation eq conversationEntityId) and (ConversationPins.user eq userEntityId)
+        }
+
+        getConversation(conversationId, requesterId)
     }
 
     fun addMembers(conversationId: UUID, requesterId: UUID, memberIds: List<UUID>): List<ConversationMemberDTO> = transaction {
@@ -255,11 +300,19 @@ class ChatService {
         }
 
         val attachmentsMap = attachmentsMap(listOf(messageEntityId))
+        val reactions = reactionsMap(listOf(messageEntityId), requesterId)
+        val conversationId = row[Messages.conversation].value
+        val members = listConversationMemberIds(conversationId).toSet()
+        val markers = loadReadMarkers(EntityID(conversationId, Conversations))
 
         Messages
             .select { Messages.id eq messageEntityId }
             .single()
-            .toMessageDTO(attachmentsMap)
+            .let { updated ->
+                val readers = readersForMessage(updated[Messages.createdAt], markers)
+                val status = statusForMessage(senderId, members, readers)
+                updated.toMessageDTO(attachmentsMap, status, readers, reactions)
+            }
     }
 
     fun deleteMessage(messageId: UUID, requesterId: UUID): MessageDTO = transaction {
@@ -286,11 +339,122 @@ class ChatService {
         MessageAttachments.deleteWhere { MessageAttachments.message eq messageEntityId }
 
         val attachmentsMap = emptyMap<UUID, List<MessageAttachmentDTO>>()
+        val conversationId = row[Messages.conversation].value
+        val members = listConversationMemberIds(conversationId).toSet()
+        val markers = loadReadMarkers(EntityID(conversationId, Conversations))
+        val reactions = reactionsMap(listOf(messageEntityId), requesterId)
 
         Messages
             .select { Messages.id eq messageEntityId }
             .single()
-            .toMessageDTO(attachmentsMap)
+            .let { updated ->
+                val readers = readersForMessage(updated[Messages.createdAt], markers)
+                val status = statusForMessage(senderId, members, readers)
+                updated.toMessageDTO(attachmentsMap, status, readers, reactions)
+            }
+    }
+
+    enum class ReactionAction { ADDED, UPDATED, REMOVED }
+
+    data class ReactionUpdate(
+        val message: MessageDTO,
+        val conversationId: UUID,
+        val emoji: String,
+        val action: ReactionAction,
+        val broadcastReactions: List<MessageReactionDTO>
+    )
+
+    fun reactToMessage(messageId: UUID, requesterId: UUID, emoji: String): ReactionUpdate = transaction {
+        if (!allowedEmojis.contains(emoji)) throw IllegalArgumentException("invalid_emoji")
+
+        val messageEntityId = EntityID(messageId, Messages)
+
+        val messageRow = Messages
+            .select { Messages.id eq messageEntityId }
+            .singleOrNull()
+            ?: throw NoSuchElementException("message_not_found")
+
+        val conversationId = messageRow[Messages.conversation].value
+        ensureMembership(conversationId, requesterId)
+
+        if (messageRow[Messages.deletedAt] != null) throw IllegalStateException("message_deleted")
+
+        val userEntityId = EntityID(requesterId, UserTable)
+        val existing = MessageReactions
+            .select { (MessageReactions.message eq messageEntityId) and (MessageReactions.user eq userEntityId) }
+            .singleOrNull()
+
+        val action = if (existing == null) ReactionAction.ADDED else ReactionAction.UPDATED
+
+        if (existing == null) {
+            MessageReactions.insert {
+                it[message] = messageEntityId
+                it[user] = userEntityId
+                it[MessageReactions.emoji] = emoji
+            }
+        } else {
+            MessageReactions.update({ MessageReactions.id eq existing[MessageReactions.id] }) {
+                it[MessageReactions.emoji] = emoji
+            }
+        }
+
+        val attachmentsMap = attachmentsMap(listOf(messageEntityId))
+        val members = listConversationMemberIds(conversationId).toSet()
+        val markers = loadReadMarkers(EntityID(conversationId, Conversations))
+        val reactionsForRequester = reactionsMap(listOf(messageEntityId), requesterId)
+        val reactionsForBroadcast = reactionsMap(listOf(messageEntityId), null)[messageId] ?: emptyList()
+
+        val updated = Messages
+            .select { Messages.id eq messageEntityId }
+            .single()
+
+        val readers = readersForMessage(updated[Messages.createdAt], markers)
+        val status = statusForMessage(updated[Messages.sender].value, members, readers)
+
+        ReactionUpdate(
+            message = updated.toMessageDTO(attachmentsMap, status, readers, reactionsForRequester),
+            conversationId = conversationId,
+            emoji = emoji,
+            action = action,
+            broadcastReactions = reactionsForBroadcast
+        )
+    }
+
+    fun removeReaction(messageId: UUID, requesterId: UUID): ReactionUpdate = transaction {
+        val messageEntityId = EntityID(messageId, Messages)
+
+        val messageRow = Messages
+            .select { Messages.id eq messageEntityId }
+            .singleOrNull()
+            ?: throw NoSuchElementException("message_not_found")
+
+        val conversationId = messageRow[Messages.conversation].value
+        ensureMembership(conversationId, requesterId)
+
+        val userEntityId = EntityID(requesterId, UserTable)
+
+        MessageReactions.deleteWhere { (MessageReactions.message eq messageEntityId) and (MessageReactions.user eq userEntityId) }
+
+        val attachmentsMap = attachmentsMap(listOf(messageEntityId))
+        val members = listConversationMemberIds(conversationId).toSet()
+        val markers = loadReadMarkers(EntityID(conversationId, Conversations))
+        val reactionsForRequester = reactionsMap(listOf(messageEntityId), requesterId)
+        val reactionsForBroadcast = reactionsMap(listOf(messageEntityId), null)[messageId] ?: emptyList()
+
+        val updated = Messages
+            .select { Messages.id eq messageEntityId }
+            .single()
+
+        val readers = readersForMessage(updated[Messages.createdAt], markers)
+        val status = statusForMessage(updated[Messages.sender].value, members, readers)
+
+        ReactionUpdate(
+            message = updated.toMessageDTO(attachmentsMap, status, readers, reactionsForRequester),
+            conversationId = conversationId,
+            emoji = "",
+            action = ReactionAction.REMOVED,
+            broadcastReactions = reactionsForBroadcast
+        )
     }
 
     fun sendMessage(
@@ -320,11 +484,17 @@ class ChatService {
         upsertReadMarker(conversationEntityId, EntityID(senderId, UserTable), messageId.value)
 
         val attachmentsByMessage = attachmentsMap(listOf(messageId))
+        val members = listConversationMemberIds(conversationId).toSet()
+        val markers = loadReadMarkers(conversationEntityId)
 
         Messages
             .select { Messages.id eq messageId }
             .single()
-            .toMessageDTO(attachmentsByMessage)
+            .let { row ->
+                val readers = readersForMessage(row[Messages.createdAt], markers)
+                val status = statusForMessage(senderId, members, readers)
+                row.toMessageDTO(attachmentsByMessage, status, readers)
+            }
     }
 
     fun listMessages(
@@ -340,7 +510,7 @@ class ChatService {
         val safeLimit = limit.coerceIn(1, 100)
         val safeOffset = offset.coerceAtLeast(0)
 
-    var condition: Op<Boolean> = Messages.conversation eq EntityID(conversationId, Conversations)
+        var condition: Op<Boolean> = Messages.conversation eq EntityID(conversationId, Conversations)
 
         tag?.let { condition = condition and (Messages.tag eq it) }
 
@@ -356,8 +526,16 @@ class ChatService {
             .toList()
 
         val attachments = attachmentsMap(rows.map { it[Messages.id] })
+        val reactions = reactionsMap(rows.map { it[Messages.id] }, requesterId)
+        val conversationEntityId = EntityID(conversationId, Conversations)
+        val markers = loadReadMarkers(conversationEntityId)
+        val members = listConversationMemberIds(conversationId).toSet()
 
-        rows.map { it.toMessageDTO(attachments) }
+        rows.map { row ->
+            val readers = readersForMessage(row[Messages.createdAt], markers)
+            val status = statusForMessage(row[Messages.sender].value, members, readers)
+            row.toMessageDTO(attachments, status, readers, reactions)
+        }
     }
 
     fun searchMessages(
@@ -373,8 +551,8 @@ class ChatService {
         val safeLimit = limit.coerceIn(1, 100)
         val safeOffset = offset.coerceAtLeast(0)
 
-    var condition: Op<Boolean> = userCondition
-    condition = condition and Messages.deletedAt.isNull()
+        var condition: Op<Boolean> = userCondition
+        condition = condition and Messages.deletedAt.isNull()
 
         tag?.let { condition = condition and (Messages.tag eq it) }
 
@@ -391,8 +569,18 @@ class ChatService {
             .toList()
 
         val attachments = attachmentsMap(rows.map { it[Messages.id] })
+        val markersByConversation = mutableMapOf<UUID, Map<UUID, ReadMarker>>()
+        val membersByConversation = mutableMapOf<UUID, Set<UUID>>()
 
-        rows.map { it.toMessageDTO(attachments) }
+        rows.map { row ->
+            val conversationId = row[Messages.conversation].value
+            val conversationEntityId = EntityID(conversationId, Conversations)
+            val markers = markersByConversation.getOrPut(conversationId) { loadReadMarkers(conversationEntityId) }
+            val members = membersByConversation.getOrPut(conversationId) { listConversationMemberIds(conversationId).toSet() }
+            val readers = readersForMessage(row[Messages.createdAt], markers)
+            val status = statusForMessage(row[Messages.sender].value, members, readers)
+            row.toMessageDTO(attachments, status, readers)
+        }
     }
 
     fun tagMessage(messageId: UUID, requesterId: UUID, tag: MessageTag): MessageDTO = transaction {
@@ -411,12 +599,19 @@ class ChatService {
             it[Messages.tag] = tag
         }
 
+        val conversationEntityId = EntityID(conversationId, Conversations)
         val attachments = attachmentsMap(listOf(messageEntityId))
+        val members = listConversationMemberIds(conversationId).toSet()
+        val markers = loadReadMarkers(conversationEntityId)
 
         Messages
             .select { Messages.id eq messageEntityId }
             .single()
-            .toMessageDTO(attachments)
+            .let { row ->
+                val readers = readersForMessage(row[Messages.createdAt], markers)
+                val status = statusForMessage(row[Messages.sender].value, members, readers)
+                row.toMessageDTO(attachments, status, readers)
+            }
     }
 
     fun assertMembership(conversationId: UUID, userId: UUID) = transaction {
@@ -447,6 +642,22 @@ class ChatService {
         }
     }
 
+    private fun ResultRow.toConversationSummary(viewerId: UUID, pinnedAt: java.time.Instant? = null): ConversationSummaryDTO {
+        val conversationId = this[Conversations.id].value
+
+        return ConversationSummaryDTO(
+            id = conversationId.toString(),
+            type = this[Conversations.type],
+            topic = this[Conversations.topic],
+            createdBy = this[Conversations.createdBy].value.toString(),
+            createdAt = this[Conversations.createdAt].toInstantString(),
+            pinnedAt = pinnedAt?.toInstantString(),
+            members = fetchMembers(conversationId),
+            lastMessage = fetchLastMessage(conversationId),
+            unreadCount = unreadCount(conversationId, viewerId)
+        )
+    }
+
     private fun ResultRow.toConversationDTO(): ConversationDTO = ConversationDTO(
         id = this[Conversations.id].value.toString(),
         type = this[Conversations.type],
@@ -456,7 +667,12 @@ class ChatService {
         createdAt = this[Conversations.createdAt].toInstantString()
     )
 
-    private fun ResultRow.toMessageDTO(attachmentsByMessage: Map<UUID, List<MessageAttachmentDTO>>): MessageDTO {
+    private fun ResultRow.toMessageDTO(
+        attachmentsByMessage: Map<UUID, List<MessageAttachmentDTO>>,
+        status: MessageStatus = MessageStatus.DELIVERED,
+        readBy: Set<UUID> = emptySet(),
+        reactionsByMessage: Map<UUID, List<MessageReactionDTO>> = emptyMap()
+    ): MessageDTO {
         val messageId = this[Messages.id].value
         val deletedAt = this[Messages.deletedAt]
         val editedAt = this[Messages.editedAt]
@@ -470,8 +686,46 @@ class ChatService {
             createdAt = this[Messages.createdAt].toInstantString(),
             editedAt = editedAt?.toInstantString(),
             deletedAt = deletedAt?.toInstantString(),
-            attachments = if (deletedAt == null) attachmentsByMessage[messageId] ?: emptyList() else emptyList()
+            attachments = if (deletedAt == null) attachmentsByMessage[messageId] ?: emptyList() else emptyList(),
+            status = status,
+            readBy = readBy.map(UUID::toString),
+            reactions = reactionsByMessage[messageId] ?: emptyList()
         )
+    }
+
+    private fun reactionsMap(messageIds: List<EntityID<UUID>>, currentUserId: UUID?): Map<UUID, List<MessageReactionDTO>> {
+        if (messageIds.isEmpty()) return emptyMap()
+
+        val rows = MessageReactions
+            .select { MessageReactions.message inList messageIds.distinct() }
+            .toList()
+
+        val me = currentUserId
+
+        val aggregated = mutableMapOf<UUID, MutableMap<String, Pair<Long, Boolean>>>()
+
+        rows.forEach { row ->
+            val messageId = row[MessageReactions.message].value
+            val emoji = row[MessageReactions.emoji]
+            val byMe = me != null && row[MessageReactions.user].value == me
+            val bucket = aggregated.getOrPut(messageId) { mutableMapOf() }
+            val current = bucket[emoji]
+            val newCount = (current?.first ?: 0) + 1
+            val reactedByMe = (current?.second ?: false) || byMe
+            bucket[emoji] = newCount to reactedByMe
+        }
+
+        return aggregated.mapValues { (_, emojiMap) ->
+            emojiMap.entries
+                .sortedWith(compareByDescending<Map.Entry<String, Pair<Long, Boolean>>> { it.value.first }.thenBy { it.key })
+                .map { (emoji, data) ->
+                    MessageReactionDTO(
+                        emoji = emoji,
+                        count = data.first,
+                        reactedByMe = data.second
+                    )
+                }
+        }
     }
 
     private fun ResultRow.toAttachmentDTO(): MessageAttachmentDTO = MessageAttachmentDTO(
@@ -495,6 +749,44 @@ class ChatService {
             .select { MessageAttachments.message inList unique }
             .groupBy { it[MessageAttachments.message].value }
             .mapValues { entry -> entry.value.map { it.toAttachmentDTO() } }
+    }
+
+    private data class ReadMarker(val lastReadAt: Instant, val lastReadMessage: UUID?)
+
+    private fun loadReadMarkers(conversationId: EntityID<UUID>): Map<UUID, ReadMarker> {
+        return ConversationReadMarkers
+            .select { ConversationReadMarkers.conversation eq conversationId }
+            .associate { row ->
+                val userId = row[ConversationReadMarkers.user].value
+                val messageId = row[ConversationReadMarkers.lastReadMessage]?.value
+                userId to ReadMarker(row[ConversationReadMarkers.lastReadAt], messageId)
+            }
+    }
+
+    private fun readersForMessage(
+        createdAt: Instant,
+        markers: Map<UUID, ReadMarker>
+    ): Set<UUID> {
+        return markers.filter { (_, marker) ->
+            val byTime = marker.lastReadAt >= createdAt
+            val byMessage = marker.lastReadMessage != null
+            if (byMessage) byTime || marker.lastReadAt >= createdAt else byTime
+        }.keys
+    }
+
+    private fun statusForMessage(
+        senderId: UUID,
+        members: Set<UUID>,
+        readers: Set<UUID>
+    ): MessageStatus {
+        val others = members - senderId
+        return if (others.isEmpty()) {
+            MessageStatus.READ
+        } else if (others.all { readers.contains(it) }) {
+            MessageStatus.READ
+        } else {
+            MessageStatus.DELIVERED
+        }
     }
 
     private fun saveAttachments(messageId: EntityID<UUID>, attachments: List<AttachmentInput>) {
@@ -543,6 +835,13 @@ class ChatService {
             .map { it.toConversationMemberDTO() }
     }
 
+    fun listConversationMemberIds(conversationId: UUID): List<UUID> = transaction {
+        val conversationEntityId = EntityID(conversationId, Conversations)
+        ConversationMembers
+            .select { ConversationMembers.conversation eq conversationEntityId }
+            .map { it[ConversationMembers.user].value }
+    }
+
     private fun fetchLastMessage(conversationId: UUID): MessageDTO? {
         val conversationEntityId = EntityID(conversationId, Conversations)
         val rows = Messages
@@ -554,7 +853,14 @@ class ChatService {
         if (rows.isEmpty()) return null
 
         val attachments = attachmentsMap(rows.map { it[Messages.id] })
-        return rows.first().toMessageDTO(attachments)
+        val reactions = reactionsMap(rows.map { it[Messages.id] }, null)
+        val members = listConversationMemberIds(conversationId).toSet()
+        val markers = loadReadMarkers(conversationEntityId)
+        return rows.first().let { row ->
+            val readers = readersForMessage(row[Messages.createdAt], markers)
+            val status = statusForMessage(row[Messages.sender].value, members, readers)
+            row.toMessageDTO(attachments, status, readers, reactions)
+        }
     }
 
     private fun unreadCount(conversationId: UUID, userId: UUID): Long {

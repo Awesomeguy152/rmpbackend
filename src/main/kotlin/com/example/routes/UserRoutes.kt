@@ -9,21 +9,22 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import java.util.UUID
 
-fun Route.meRoutes() {
+fun Route.userRoutes() {
     val service = UserService()
 
     authenticate("auth-jwt") {
-        get("/api/me") {
+        get("/api/users") {
             val principal = call.principal<JWTPrincipal>()
                 ?: return@get call.respond(HttpStatusCode.Unauthorized)
 
-            val userId = principal.subject?.toUuidOrNull()
+            val requesterId = principal.subject?.toUuidOrNull()
                 ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "invalid_subject"))
 
-            val profile = service.findProfile(userId)
-                ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "user_not_found"))
+            val limit = call.request.queryParameters["limit"]?.toIntOrNull()?.coerceIn(1, 100) ?: 20
+            val query = call.request.queryParameters["q"]
 
-            call.respond(profile)
+            val users = service.searchContacts(requesterId, query, limit)
+            call.respond(users)
         }
     }
 }
