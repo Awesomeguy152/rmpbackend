@@ -3,11 +3,14 @@ package com.example.services
 import com.cloudinary.Cloudinary
 import com.cloudinary.utils.ObjectUtils
 import java.io.InputStream
+import org.slf4j.LoggerFactory
 
 /**
  * Сервис для загрузки изображений в Cloudinary
  */
 class CloudinaryService {
+    
+    private val logger = LoggerFactory.getLogger(CloudinaryService::class.java)
     
     private val cloudinary: Cloudinary by lazy {
         val cloudName = System.getenv("CLOUDINARY_CLOUD_NAME") 
@@ -17,6 +20,7 @@ class CloudinaryService {
         val apiSecret = System.getenv("CLOUDINARY_API_SECRET") 
             ?: throw IllegalStateException("CLOUDINARY_API_SECRET not set")
         
+        logger.info("Initializing Cloudinary with cloud_name: $cloudName")
         Cloudinary(ObjectUtils.asMap(
             "cloud_name", cloudName,
             "api_key", apiKey,
@@ -32,7 +36,9 @@ class CloudinaryService {
      * @return URL загруженного изображения
      */
     fun uploadAvatar(inputStream: InputStream, userId: String): String {
+        logger.info("uploadAvatar: Starting upload for userId: $userId")
         val bytes = inputStream.readBytes()
+        logger.info("uploadAvatar: Read ${bytes.size} bytes")
         
         val result = cloudinary.uploader().upload(bytes, ObjectUtils.asMap(
             "folder", "avatars",
@@ -41,7 +47,9 @@ class CloudinaryService {
             "resource_type", "image"
         ))
         
-        return result["secure_url"] as String
+        val secureUrl = result["secure_url"] as String
+        logger.info("uploadAvatar: Success! URL: $secureUrl")
+        return secureUrl
     }
     
     /**

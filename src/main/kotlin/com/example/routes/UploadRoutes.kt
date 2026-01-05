@@ -22,6 +22,8 @@ data class UploadResponse(
 fun Route.uploadRoutes() {
     val userService = UserService()
     val cloudinaryService = CloudinaryService()
+    
+    application.log.info("UploadRoutes initialized - using Cloudinary for uploads")
 
     authenticate("auth-jwt") {
         // Загрузка аватара
