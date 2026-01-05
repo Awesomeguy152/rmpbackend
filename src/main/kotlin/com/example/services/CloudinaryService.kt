@@ -38,13 +38,7 @@ class CloudinaryService {
             "folder", "avatars",
             "public_id", "avatar_$userId",
             "overwrite", true,
-            "resource_type", "image",
-            "transformation", ObjectUtils.asMap(
-                "width", 256,
-                "height", 256,
-                "crop", "fill",
-                "gravity", "face"
-            )
+            "resource_type", "image"
         ))
         
         return result["secure_url"] as String
